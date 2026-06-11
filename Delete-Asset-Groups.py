@@ -13,17 +13,15 @@ semaphore = asyncio.Semaphore(32)
 
 
 def read_api_config():
-    """Read API configuration from config file"""
     config = configparser.ConfigParser()
     config.read(API_CONFIG_PATH)
-    baseurl = config.get('URL', 'BaseURL')
+    baseurl   = config.get('URL', 'BaseURL')
     api_key_id = config.get('AUTHENTICATION', 'ACCESS_KEY_ID')
-    api_key = config.get('AUTHENTICATION', 'SECRET_KEY')
+    api_key   = config.get('AUTHENTICATION', 'SECRET_KEY')
     return baseurl, api_key_id, api_key
 
 
 async def make_post_request(url, payload, api_key_id, api_key, session, semaphore, max_retries=3, backoff_factor=5):
-    """Send a POST request with retry logic and return the JSON response asynchronously."""
     headers = {
         'x-xdr-auth-id': api_key_id,
         'Authorization': api_key,
@@ -38,13 +36,10 @@ async def make_post_request(url, payload, api_key_id, api_key, session, semaphor
                     if response.status in [200, 201]:
                         return {'success': True, 'data': await response.json()}
                     else:
-                        # Return error details instead of printing repeatedly
-                        error_data = None
                         try:
                             error_data = await response.json()
-                        except:
+                        except Exception:
                             error_data = {'error': response_text}
-                        
                         if attempt == max_retries:
                             return {'success': False, 'status': response.status, 'error': error_data}
                         await asyncio.sleep(backoff_factor ** (attempt - 1))
@@ -63,76 +58,90 @@ async def make_post_request(url, payload, api_key_id, api_key, session, semaphor
 
 
 async def fetch_all_assetgroups(baseurl, api_key_id, api_key, session, semaphore):
-    """Fetch all custom asset groups using pagination"""
-    assetgroups_url = f"{baseurl}/public_api/v1/asset-groups"
-    assetgroups_data = []
-    page_size = 1000
-    search_from = 0
-    search_to = page_size
+    """
+    Fetch all Dynamic asset groups using pagination.
 
-    print("Fetching all custom asset groups...")
+    API response structure:
+        reply.data[]              — list of group dicts
+        reply.metadata.filter_count — count matching the filter
+        reply.metadata.total_count  — total groups in system
+
+    Group fields:
+        XDM.ASSET_GROUP.ID
+        XDM.ASSET_GROUP.NAME
+        XDM.ASSET_GROUP.TYPE
+    """
+    url          = f"{baseurl}/public_api/v1/asset-groups"
+    all_groups   = []
+    page_size    = 1000
+    search_from  = 0
+    filter_count = None
+
+    print("Fetching all Dynamic asset groups...")
 
     while True:
-        assetgroups_payload = {
-                  "request_data": {
-                      "filters": {
-                        "AND": [
-                          {
-                            "SEARCH_FIELD": "XDM.ASSET_GROUP.TYPE",
-                            "SEARCH_TYPE": "EQ",
-                            "SEARCH_VALUE": "Dynamic"
-                          }
-                              ]
-                      },
-                      "sort": [
-                        {
-                          "FIELD": "XDM.ASSET_GROUP.LAST_UPDATE_TIME",
-                          "ORDER": "DESC"
-                        }
-                      ],
-                          "search_from": search_from,
-                          "search_to": search_to
-                    }
-                }
-        print(f"Fetching all custom asset groups payload {assetgroups_payload}")
+        payload = {
+            "request_data": {
+                "filters": {
+                    "AND": [{
+                        "SEARCH_FIELD": "XDM.ASSET_GROUP.TYPE",
+                        "SEARCH_TYPE":  "EQ",
+                        "SEARCH_VALUE": "Dynamic"
+                    }]
+                },
+                "sort": [{
+                    "FIELD": "XDM.ASSET_GROUP.LAST_UPDATE_TIME",
+                    "ORDER": "DESC"
+                }],
+                "search_from": search_from,
+                "search_to":   search_from + page_size
+            }
+        }
 
-        response = await make_post_request(assetgroups_url, assetgroups_payload, api_key_id, api_key, session, semaphore)
+        response = await make_post_request(
+            url, payload, api_key_id, api_key, session, semaphore
+        )
+
         if not response or not response.get('success'):
-            print(f"   -> Not Retrieved  {assetgroups_payload} asset groups...")
-            break
-        assetgroups_response = response.get('data', {})
-        reply_block = assetgroups_response.get("reply", {})
-        page_assetgroups = reply_block.get("filter_count", [])
-        total_count = reply_block.get("total_count", 0)
-
-        if not page_assetgroups:
+            print(f"  -> Fetch failed at offset {search_from}: {response}")
             break
 
-        assetgroups_data.extend(page_assetgroups)
-        print(f"   -> Retrieved {len(assetgroups_data)} of {total_count} asset groups...")
+        reply    = response.get('data', {}).get('reply', {})
+        metadata = reply.get('metadata', {})
+        page     = reply.get('data', [])   # actual group list
 
-        if total_count > 0 and len(assetgroups_data) >= total_count:
+        # Capture filter_count on first page
+        if filter_count is None:
+            filter_count = metadata.get('filter_count', 0)
+            print(f"  -> Total matching groups: {filter_count} "
+                  f"(system total: {metadata.get('total_count')})")
+
+        if not page:
             break
 
-        if len(page_assetgroups) < page_size:
-            break
+        all_groups.extend(page)
+        print(f"  -> Fetched {len(all_groups)}/{filter_count} groups")
 
         search_from += page_size
-        search_to += page_size
+        if search_from >= filter_count:
+            break
 
-    return assetgroups_data
+    return all_groups
 
 
-async def delete_assetgroup(baseurl, api_key_id, api_key, standard_id, session, semaphore):
-    """Delete a compliance standard by ID. Returns (success, error_message)"""
-    delete_url = f"{baseurl}/public_api/v1/asset-groups/delete/"
-    payload = {
-        "request_data": {
-            "id": standard_id
-        }
-    }
+async def delete_assetgroup(baseurl, api_key_id, api_key, group_id, session, semaphore):
+    """
+    Delete an asset group by ID.
+    Endpoint: POST /public_api/v1/asset-groups/delete/
+    Payload:  { "request_data": { "id": <int> } }
+    Returns (success: bool, error_msg: str|None)
+    """
+    url     = f"{baseurl}/public_api/v1/asset-groups/delete/{group_id}"
+    payload = {}
 
-    response = await make_post_request(delete_url, payload, api_key_id, api_key, session, semaphore)
+    response = await make_post_request(
+        url, payload, api_key_id, api_key, session, semaphore
+    )
 
     if not response:
         return False, "No response from API"
@@ -140,13 +149,19 @@ async def delete_assetgroup(baseurl, api_key_id, api_key, standard_id, session, 
     if response.get('success'):
         return True, None
 
-    # Extract error message
+    # Surface the full raw error for debugging
     error_data = response.get('error', {})
+    status     = response.get('status', 'unknown')
+
     if isinstance(error_data, dict):
-        reply = error_data.get('reply', {})
-        error_msg = reply.get('err_extra') or reply.get('err_msg', 'Unknown error')
+        reply     = error_data.get('reply', {})
+        error_msg = (
+            reply.get('err_extra')
+            or reply.get('err_msg')
+            or f"HTTP {status} | raw: {error_data}"
+        )
     else:
-        error_msg = str(error_data)
+        error_msg = f"HTTP {status} | raw: {error_data}"
 
     return False, error_msg
 
@@ -155,91 +170,101 @@ async def main():
     baseurl, api_key_id, api_key = read_api_config()
 
     async with aiohttp.ClientSession() as session:
-        # Fetch all custom standards
-        all_assetgroups = await fetch_all_assetgroups(baseurl, api_key_id, api_key, session, semaphore)
+        all_groups = await fetch_all_assetgroups(
+            baseurl, api_key_id, api_key, session, semaphore
+        )
 
-        if not all_assetgroups:
-            print(Fore.YELLOW + "No custom asset groups found." + Style.RESET_ALL)
+        if not all_groups:
+            print(Fore.YELLOW + "No Dynamic asset groups found." + Style.RESET_ALL)
             return
 
-        # Filter asset groups starting with "hostVulnerability_"
-        matching_assetgroups = [
-            std for std in all_assetgroups 
-            if std.get('name', '').startswith('hostVulnerability_')
+        # ---------------------------------------------------------------
+        # Filter: groups matching any of these rules will be deleted.
+        # ---------------------------------------------------------------
+        STARTSWITH_PATTERNS = [
+            'hostVulnerability_',
+            'serverlessVulnerability_',
+            'vmVulnerability_',
+            'vmCompliance_',
+            'hostCompliance_',
+            'ciImagesVulnerability_',
+            'containerCompliance_',
+            'containerVulnerability_',
+        ]
+        CONTAINS_PATTERNS = [
+            '-prisma_cloud_copy-',
         ]
 
-        if not matching_assetgroups:
-            print(Fore.YELLOW + "No asset groups found matching pattern 'hostVulnerability_*'" + Style.RESET_ALL)
+        def matches_delete_filter(name: str) -> bool:
+            for prefix in STARTSWITH_PATTERNS:
+                if name.startswith(prefix):
+                    return True
+            for substring in CONTAINS_PATTERNS:
+                if substring in name:
+                    return True
+            return False
+
+        matching = [
+            g for g in all_groups
+            if matches_delete_filter(g.get('XDM.ASSET_GROUP.NAME', ''))
+        ]
+
+        if not matching:
+            print(Fore.YELLOW
+                  + "No asset groups found matching any delete filter."
+                  + Style.RESET_ALL)
             return
 
-        # Display matching standards
-        print(f"\n{Fore.CYAN}Found {len(matching_assetgroups)} asset groups matching pattern 'hostVulnerability_*':{Style.RESET_ALL}")
-        for idx, standard in enumerate(matching_assetgroups, start=1):
-            name = standard.get('name', 'Unknown')
-            std_id = standard.get('id', 'Unknown')
-            controls_count = len(standard.get('controls_ids') or [])
-            created_by = standard.get('created_by', 'Unknown')
-            print(f"{idx}. {Fore.GREEN}{name}{Style.RESET_ALL}")
-            print(f"   ID: {std_id}")
-            print(f"   Controls: {controls_count}, Created by: {created_by}")
+        # Display matches
+        print(f"\n{Fore.CYAN}Found {len(matching)} groups matching delete filters:{Style.RESET_ALL}")
+        for idx, g in enumerate(matching, start=1):
+            name       = g.get('XDM.ASSET_GROUP.NAME', 'Unknown')
+            group_id   = g.get('XDM.ASSET_GROUP.ID', 'Unknown')
+            created_by = g.get('XDM.ASSET_GROUP.CREATED_BY_PRETTY', 'Unknown')
+            print(f"  {idx}. {Fore.GREEN}{name}{Style.RESET_ALL}")
+            print(f"       ID: {group_id}  |  Created by: {created_by}")
 
-        # Ask for confirmation
-        print(f"\n{Fore.YELLOW}WARNING: This will permanently delete {len(matching_assetgroups)} asset groups!{Style.RESET_ALL}")
-        confirmation = input(f"Type 'DELETE' to confirm deletion: ").strip()
+        # Confirm
+        print(f"\n{Fore.YELLOW}WARNING: This will permanently delete "
+              f"{len(matching)} asset groups!{Style.RESET_ALL}")
+        confirmation = input("Type 'DELETE' to confirm: ").strip()
 
         if confirmation != 'DELETE':
             print(Fore.YELLOW + "Deletion cancelled." + Style.RESET_ALL)
             return
 
-        # Delete each standard
-        print(f"\n{Fore.CYAN}Starting deletion process...{Style.RESET_ALL}")
-        deleted_count = 0
-        failed_count = 0
-        failed_assetgroups = []
-        profile_associated_count = 0
+        # Delete
+        print(f"\n{Fore.CYAN}Starting deletion...{Style.RESET_ALL}")
+        deleted_count  = 0
+        failed_count   = 0
+        in_use_count   = 0
+        failed_details = []
 
-        for standard in matching_assetgroups:
-            name = standard.get('name', 'Unknown')
-            std_id = standard.get('id', 'Unknown')
+        for g in matching:
+            name     = g.get('XDM.ASSET_GROUP.NAME', 'Unknown')
+            group_id = g.get('XDM.ASSET_GROUP.ID')
 
-            print(f"Deleting: {name}...", end=' ')
+            print(f"  Deleting: {name} (id={group_id})...", end=' ', flush=True)
 
-            success, error_msg = await delete_assetgroup(baseurl, api_key_id, api_key, std_id, session, semaphore)
+            success, error_msg = await delete_assetgroup(
+                baseurl, api_key_id, api_key, group_id, session, semaphore
+            )
 
             if success:
                 print(Fore.GREEN + "✓ Deleted" + Style.RESET_ALL)
                 deleted_count += 1
             else:
-                # Check if it's the assessment profile error
-                if error_msg and 'assessment profile' in error_msg.lower():
-                    print(Fore.YELLOW + "⚠ Skipped (in use by assessment profile)" + Style.RESET_ALL)
-                    profile_associated_count += 1
-                else:
-                    print(Fore.RED + f"✗ Failed: {error_msg}" + Style.RESET_ALL)
-
-                failed_assetgroups.append({'name': name, 'id': std_id, 'error': error_msg})
+                print(Fore.RED + f"✗ Failed: {error_msg}" + Style.RESET_ALL)
+                failed_details.append({'name': name, 'id': group_id, 'error': error_msg})
                 failed_count += 1
 
         # Summary
-        print(f"\n{Fore.CYAN}{'='*80}{Style.RESET_ALL}")
-        print(f"{Fore.CYAN}Deletion Summary:{Style.RESET_ALL}")
-        print(f"  Successfully deleted: {Fore.GREEN}{deleted_count}{Style.RESET_ALL}")
-        print(f"  Failed: {Fore.RED}{failed_count}{Style.RESET_ALL}")
-        if profile_associated_count > 0:
-            print(f"    └─ Associated with assessment profiles: {Fore.YELLOW}{profile_associated_count}{Style.RESET_ALL}")
-        print(f"  Total processed: {len(matching_assetgroups)}")
+        print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Summary:{Style.RESET_ALL}")
+        print(f"  Deleted:  {Fore.GREEN}{deleted_count}{Style.RESET_ALL}")
+        print(f"  Failed:   {Fore.RED}{failed_count}{Style.RESET_ALL}")
+        print(f"  Total:    {len(matching)}")
 
-        # Show details of failed standards
-        if failed_assetgroups and profile_associated_count > 0:
-            print(f"\n{Fore.YELLOW}Note: {profile_associated_count} standard(s) could not be deleted because they are")
-            print(f"associated with assessment profiles. To delete these standards:{Style.RESET_ALL}")
-            print(f"  1. Go to Cortex > Compliance > Assessment Profiles")
-            print(f"  2. Remove the standard from all associated profiles")
-            print(f"  3. Run this script again")
-            print(f"\n{Fore.YELLOW}Standards associated with assessment profiles:{Style.RESET_ALL}")
-            for failed in failed_assetgroups:
-                if 'assessment profile' in failed['error'].lower():
-                    print(f"  - {failed['name']}")
 
 
 if __name__ == "__main__":
