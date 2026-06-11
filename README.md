@@ -5,4 +5,6 @@ Removes the following:
  * Cloud Security Rules created from Prisma Cloud RQL Policies 
  * Workload Security Rules created from Prisma Cloud 
  * Vulnerability Rules created from Prisma Cloud 
+ * Asset Groups created from Prisma Cloud 
+ * Asset Groups Renaming (Stripping "Asset group for " prefix)
  * Correlation Rules Duplicates
