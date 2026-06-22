@@ -17,6 +17,7 @@ import csv
 import json
 import os
 import sys
+import time
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -75,6 +76,29 @@ class CortexBulkKeyProvisioner:
             'Accept': 'application/json'
         }
 
+    def get_existing_comments(self):
+        """
+        Queries the gateway to extract comments of all active keys for duplicate checking.
+        """
+        url = f"{self.baseurl}/public_api/v1/api_keys/get_api_keys"
+        payload = {"request_data": {}}
+        try:
+            response = requests.post(url, headers=self._get_headers(), json=payload, verify=SSL_VERIFY, timeout=15)
+            response.raise_for_status()
+            res_json = response.json()
+            reply = res_json.get("reply", {})
+            keys_list = reply.get("DATA", []) or reply.get("data", [])
+
+            comments = []
+            for k in keys_list:
+                comment = k.get("comment")
+                if comment:
+                    comments.append(str(comment).strip())
+            return comments
+        except Exception as err:
+            print(f"[!] Warning: Failed to retrieve existing keys for deduplication check: {err}")
+            return []
+
     def generate_api_key(self, first_name, last_name, role, expiration_ms=None):
         url = f"{self.baseurl}/public_api/v1/api_keys/generate"
         payload = {
@@ -84,6 +108,7 @@ class CortexBulkKeyProvisioner:
                 "comment": f"Assigned to user: {first_name} {last_name}"
             }
         }
+        print(f"payload: {payload}")
         if expiration_ms:
             payload["request_data"]["expiration"] = expiration_ms
 
@@ -169,12 +194,35 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, role,
         print("[!] Ingest manifest is empty.")
         return
 
+    print("[*] Gathering existing platform metadata for safety crosscheck...")
+    existing_comments = provisioner_client.get_existing_comments()
+
     print(f"[+] Processing {len(target_records)} personnel records...")
     results_ledger = []
+    creation_count = 0
 
     for idx, record in enumerate(target_records, start=1):
         f_name, l_name, dept_name = record['first'], record['last'], record['dept']
         cloud_status = "NOT REQUESTED"
+
+        # Check for matching structural audit comment
+        target_comment = f"Assigned to user: {f_name} {l_name}"
+        if target_comment in existing_comments:
+            print(f"\n[!] Duplicate Detected: An active key already exists for '{f_name} {l_name}'.")
+            confirm = input("    Do you want to skip this user? (Y/n): ").strip().lower()
+            if confirm != 'n':
+                print(f"    [→] Skipping token creation for {f_name} {l_name}.")
+                results_ledger.append({
+                    'Firstname': f_name, 'Lastname': l_name, 'Department': dept_name,
+                    'Assigned_Role': role, 'api_key_id': 'SKIPPED', 'api_key': 'SKIPPED',
+                    'cortex_status': 'SKIPPED', 'cloud_vault_status': 'SKIPPED'
+                })
+                continue
+
+        # If we are creating a key, evaluate if a throttle cooldown is required
+        if creation_count > 0:
+            print(f"[*] Rate Limit Guard: Pausing for 15 seconds before next task...")
+            time.sleep(15)
 
         print(f"[{idx}/{len(target_records)}] Generating Key for: {f_name} {l_name}")
         key_id, secret = provisioner_client.generate_api_key(f_name, l_name, role, expiration_ms)
@@ -218,7 +266,7 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, role,
             writer = csv.DictWriter(outfile, fieldnames=csv_headers)
             writer.writeheader()
             writer.writerows(results_ledger)
-        print(f"[+] Saved local copy to: {output_path}")
+        print(f"[+] Saved local transaction copy to: {output_path}")
 
 
 if __name__ == "__main__":
