@@ -1,0 +1,13 @@
+# Core HTTP Engine
+requests>=2.31.0
+
+# AWS Secret Storage Engine
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Azure Vault Storage Engine
+azure-identity>=1.15.0
+azure-keyvault-secrets>=4.7.0
+
+# GCP Secret Storage Engine
+google-cloud-secret-manager>=2.20.0
