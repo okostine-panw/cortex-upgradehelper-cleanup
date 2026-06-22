@@ -81,7 +81,7 @@ class CortexBulkKeyProvisioner:
         Queries the gateway to extract comments of all active keys for duplicate checking.
         """
         url = f"{self.baseurl}/public_api/v1/api_keys/get_api_keys"
-        payload = {"request_data": {}}
+        payload = {"request_data": {"filters": []}}
         try:
             response = requests.post(url, headers=self._get_headers(), json=payload, verify=SSL_VERIFY, timeout=15)
             response.raise_for_status()
