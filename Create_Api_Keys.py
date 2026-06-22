@@ -221,13 +221,18 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, role,
 
         # If we are creating a key, evaluate if a throttle cooldown is required
         if creation_count > 0:
-            print(f"[*] Rate Limit Guard: Pausing for 15 seconds before next task...")
-            time.sleep(15)
+            if creation_count % 10 == 0:
+                print(f"\n[!] Batch Limit Reached ({creation_count} keys created). Injecting 60-second cool-down to clear gateway buffers...")
+                time.sleep(60)
+            else:
+                print(f"[*] Rate Limit Guard: Pausing for 15 seconds before next task...")
+                time.sleep(15)
 
         print(f"[{idx}/{len(target_records)}] Generating Key for: {f_name} {l_name}")
         key_id, secret = provisioner_client.generate_api_key(f_name, l_name, role, expiration_ms)
 
         if key_id and secret:
+            creation_count += 1
             secret_payload = {
                 "CORTEX_API_KEY_ID": key_id, "CORTEX_API_KEY": secret,
                 "ROLE": role, "DEPARTMENT": dept_name, "SYNC_DATE": datetime.now(timezone.utc).isoformat()
@@ -302,4 +307,7 @@ if __name__ == "__main__":
 
     save_local_csv = input("\nDo you also want to save a local backup CSV ledger? (Y/n): ").strip().lower() != 'n'
 
-    run_provisioning_workflow("users.csv", "generated_developer_keys.csv", cortex_client, selected_role, expiration_ms, save_local_csv, cloud_config)
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"generated_developer_keys_{timestamp_str}.csv"
+
+    run_provisioning_workflow("users.csv", output_filename, cortex_client, selected_role, expiration_ms, save_local_csv, cloud_config)
