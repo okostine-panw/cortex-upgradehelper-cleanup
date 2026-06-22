@@ -1,22 +1,17 @@
 """
-Cortex Developer Key Provisioner
+Cortex Bulk Key Provisioner
 
-This script automates the bulk creation of "Standard" security level API keys
-assigned to the "Developer" role. It parses user details from an input CSV,
-combines the first and last name to create an audit comment, and allows the
-operator to declare an explicit token expiration deadline.
-
-This script drops right into your repository workspace and automatically reads
-your existing .ini configuration format.
+This script automates the bulk creation of "Standard" security level API keys.
+It parses user details from an input CSV, combines the first and last name to
+create an audit comment, and allows the operator to select both a custom role
+and an optional token expiration deadline at runtime.
 
 Example Input CSV File (e.g., users.csv):
 ----------------------------------------
 Firstname,Lastname,Department
-John,Doe,Engineering
-Jane,Doe,Platform-Ops
-Alex,Smith,Security-Dev
+Oleg,Kostine,PSO
 
-Note: Column headers are case-insensitive and trailing spaces are ignored.
+Note: Column headers are case-insensitive and handles hidden BOM markers.
 """
 
 import configparser
@@ -30,8 +25,6 @@ from datetime import datetime, timezone, timedelta
 # REPOSITORY CONFIGURATION METHOD Alignment
 # ==============================================================================
 API_CONFIG_PATH = 'API_config-x5.ini'
-# API_CONFIG_PATH = 'API_config-c3.ini'
-# API_CONFIG_PATH = 'API_config-c1.ini'
 SSL_VERIFY = False  # Matches your repository's security verify flag
 
 
@@ -72,16 +65,17 @@ class CortexBulkKeyProvisioner:
             'Accept': 'application/json'
         }
 
-    def generate_developer_key(self, first_name, last_name, expiration_ms=None):
+    def generate_api_key(self, first_name, last_name, role, expiration_ms=None):
         """
-        Dispatches a POST request to programmatically spin up a Standard Developer target key.
+        Dispatches a POST request to programmatically spin up a Standard key
+        assigned to the user-selected role.
         """
         url = f"{self.baseurl}/public_api/v1/api_keys/generate"
 
         payload = {
             "request_data": {
-                "roles": ["Developer"],
-                "security_level": "standard",
+                "roles": [role],               # Dynamically assigned role from prompt
+                "security_level": "standard",  # Enforces Standard security level
                 "comment": f"Assigned to user: {first_name} {last_name}"
             }
         }
@@ -109,11 +103,11 @@ class CortexBulkKeyProvisioner:
             return None, None
 
         except Exception as err:
-            print(f"[-] API connection checkpoint error for user '{first_name} {last_name}': {err}")
+            print(f"[-] API failure for user '{first_name} {last_name}': {err}")
             return None, None
 
 
-def run_provisioning_workflow(input_path, output_path, provisioner_client, expiration_ms=None):
+def run_provisioning_workflow(input_path, output_path, provisioner_client, role, expiration_ms=None):
     """
     Parses the updated CSV structure, handles hidden BOM signatures,
     maps fields, and generates keys sequentially.
@@ -124,11 +118,9 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, expir
 
     target_records = []
 
-    # FIX: Using 'utf-8-sig' automatically strips hidden BOM formatting characters
+    # Using 'utf-8-sig' cleanly swallows hidden BOM markers from Excel/Text editors
     with open(input_path, mode='r', newline='', encoding='utf-8-sig') as infile:
         reader = csv.DictReader(infile)
-
-        # Normalize headers cleanly by stripping outer spaces and forcing lowercase
         headers = {f.lower().strip(): f for f in reader.fieldnames} if reader.fieldnames else {}
 
         fname_key = headers.get('firstname')
@@ -152,8 +144,10 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, expir
         print("[!] Execution halted: Ingest user records file is empty.")
         return
 
-    print(f"[+] Loaded {len(target_records)} personnel records. Starting transaction map...")
-    csv_headers = ['Firstname', 'Lastname', 'Department', 'api_key_id', 'api_key', 'status']
+    print(f"[+] Loaded {len(target_records)} personnel records. Mapping assignments...")
+
+    # Track the selected role in the output file for auditing sanity
+    csv_headers = ['Firstname', 'Lastname', 'Department', 'Assigned_Role', 'api_key_id', 'api_key', 'status']
 
     with open(output_path, mode='w', newline='', encoding='utf-8') as outfile:
         writer = csv.DictWriter(outfile, fieldnames=csv_headers)
@@ -164,14 +158,15 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, expir
             l_name = record['last']
             dept_name = record['dept']
 
-            print(f"[{idx}/{len(target_records)}] Generating Standard Developer key for: {f_name} {l_name}")
-            key_id, secret = provisioner_client.generate_developer_key(f_name, l_name, expiration_ms)
+            print(f"[{idx}/{len(target_records)}] Generating Standard '{role}' key for: {f_name} {l_name}")
+            key_id, secret = provisioner_client.generate_api_key(f_name, l_name, role, expiration_ms)
 
             if key_id and secret:
                 writer.writerow({
                     'Firstname': f_name,
                     'Lastname': l_name,
                     'Department': dept_name,
+                    'Assigned_Role': role,
                     'api_key_id': key_id,
                     'api_key': secret,
                     'status': 'SUCCESS'
@@ -181,6 +176,7 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, expir
                     'Firstname': f_name,
                     'Lastname': l_name,
                     'Department': dept_name,
+                    'Assigned_Role': role,
                     'api_key_id': 'FAILED',
                     'api_key': 'FAILED',
                     'status': 'ERROR'
@@ -188,16 +184,26 @@ def run_provisioning_workflow(input_path, output_path, provisioner_client, expir
 
     print(f"[+] Operational run finished. Generated keys exported to: {output_path}")
 
+
 if __name__ == "__main__":
-    # 1. Ingest repo configurations using your existing parser approach
+    # 1. Ingest repo configuration using the parser definition matching your example
     baseurl, api_key_id, api_key = read_api_config()
 
     # 2. Instantiate client bridge
     cortex_client = CortexBulkKeyProvisioner(baseurl, api_key_id, api_key)
 
+    print("\n--- Cortex Role & Policy Configurations ---")
+
+    # NEW: Prompt the operator for the desired role assignment scope
+    selected_role = input("Enter Cortex Role name to provision (Default: Developer): ").strip()
+    if not selected_role:
+        selected_role = "Developer"
+
+    print(f"[+] Configured to provision all keys with the role: {selected_role}\n")
+
     # 3. Handle custom expiration date timelines
     print("--- Cortex Token Expiration Configuration ---")
-    user_input = input("Enter API key lifetime in days (Default is 7 days, Max 180): ").strip()
+    user_input = input("Enter API key lifetime in days (Default: 7 days, Max: 180): ").strip()
 
     expiration_ms = None
     if user_input:
@@ -215,4 +221,4 @@ if __name__ == "__main__":
     INPUT_FILE_CSV = "users.csv"
     OUTPUT_FILE_CSV = "generated_developer_keys.csv"
 
-    run_provisioning_workflow(INPUT_FILE_CSV, OUTPUT_FILE_CSV, cortex_client, expiration_ms)
+    run_provisioning_workflow(INPUT_FILE_CSV, OUTPUT_FILE_CSV, cortex_client, selected_role, expiration_ms)
