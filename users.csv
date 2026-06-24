@@ -1,2 +1,3 @@
-﻿Firstname,Lastname,Department
-Oleg,Kostine,PSO
+Firstname,Lastname,Department,Email
+Oleg,Kostine,PSO,okostine@example.com
+Jane,Doe,Engineering,jdoe@example.com
