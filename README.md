@@ -8,3 +8,5 @@ Removes the following:
  * Asset Groups created from Prisma Cloud 
  * Asset Groups Renaming (Stripping "Asset group for " prefix)
  * Correlation Rules Duplicates
+ * Roles created from Prisma Cloud
+ * Notification Rules created from Prisma Cloud
